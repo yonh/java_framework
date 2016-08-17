@@ -4,11 +4,16 @@ package org.yonh.helper;
 //import org.slf4j.Logger;
 //import org.yonh.util.StringUtil;
 
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.sql.*;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
+import org.apache.commons.dbcp2.BasicDataSource;
 import org.apache.commons.dbutils.QueryRunner;
 import org.apache.commons.dbutils.handlers.BeanHandler;
 import org.apache.commons.dbutils.handlers.BeanListHandler;
@@ -18,14 +23,16 @@ import org.slf4j.LoggerFactory;
 import org.yonh.util.CollectionUtil;
 import org.yonh.util.PropertiesUtil;
 
+
 /**
  * 数据库操作助手类
  */
 
 public final class DatabaseHelper {
-    private static final Logger LOGGER = LoggerFactory.getLogger(DatabaseHelper.class);
-    private static final ThreadLocal<Connection> CONNECTION_THREAD_LOCAL = new ThreadLocal<Connection>();
-    private static final QueryRunner QUERY_RUNNER = new QueryRunner();
+    private static final Logger LOGGER;
+    private static final ThreadLocal<Connection> CONNECTION_THREAD_HOLDER;
+    private static final QueryRunner QUERY_RUNNER;
+    private static final BasicDataSource DATA_SOURCE;
 
     private static final String DRIVER;
     private static final String URL;
@@ -33,17 +40,29 @@ public final class DatabaseHelper {
     private static final String PASSWORD;
 
     static {
+        LOGGER = LoggerFactory.getLogger(DatabaseHelper.class);
         Properties properties = PropertiesUtil.loadProperties("jdbc.properties");
+        CONNECTION_THREAD_HOLDER = new ThreadLocal<Connection>();
+        QUERY_RUNNER = new QueryRunner();
+
+
         DRIVER = properties.getProperty("jdbc.driver");
         URL = properties.getProperty("jdbc.url");
         USERNAME = properties.getProperty("jdbc.username");
         PASSWORD = properties.getProperty("jdbc.password");
 
-        try {
-            Class.forName(DRIVER);
-        } catch (ClassNotFoundException e) {
-            LOGGER.error("can not load jdbc driver");
-        }
+        DATA_SOURCE = new BasicDataSource();
+        DATA_SOURCE.setDriverClassName(DRIVER);
+        DATA_SOURCE.setUrl(URL);
+        DATA_SOURCE.setUsername(USERNAME);
+        DATA_SOURCE.setPassword(PASSWORD);
+
+
+//        try {
+//            Class.forName(DRIVER);
+//        } catch (ClassNotFoundException e) {
+//            LOGGER.error("can not load jdbc driver");
+//        }
     }
 
     /**
@@ -54,14 +73,14 @@ public final class DatabaseHelper {
      * @return
      */
     public static Connection getConnection() {
-        Connection conn = CONNECTION_THREAD_LOCAL.get();
+        Connection conn = CONNECTION_THREAD_HOLDER.get();
         if (conn == null) {
             try {
-                conn = DriverManager.getConnection(URL, USERNAME, PASSWORD);
+                conn = DATA_SOURCE.getConnection();
             } catch (SQLException e) {
                 LOGGER.error("get connection failure", e);
             } finally {
-                CONNECTION_THREAD_LOCAL.set(conn);
+                CONNECTION_THREAD_HOLDER.set(conn);
             }
         }
 
@@ -74,7 +93,7 @@ public final class DatabaseHelper {
      * 使用完毕connection对象,需要将其从ThreadLocal中移除
      */
     public static void closeConnection() {
-        Connection conn = CONNECTION_THREAD_LOCAL.get();
+        Connection conn = CONNECTION_THREAD_HOLDER.get();
 
         if (conn != null) {
             try {
@@ -82,8 +101,6 @@ public final class DatabaseHelper {
             } catch (SQLException e) {
                 LOGGER.error("close connection failure", e);
                 throw new RuntimeException(e);
-            } finally {
-                CONNECTION_THREAD_LOCAL.remove();
             }
         }
     }
@@ -107,8 +124,6 @@ public final class DatabaseHelper {
         } catch (SQLException e) {
             LOGGER.error("query entity list failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
 
         return entityList;
@@ -132,8 +147,6 @@ public final class DatabaseHelper {
         } catch (SQLException e) {
             LOGGER.error("query entity failure", e);
             throw new RuntimeException(e);
-        } finally {
-            closeConnection();
         }
 
         return entity;
@@ -169,16 +182,112 @@ public final class DatabaseHelper {
     public static int executeUpdate(String sql, Object... params) {
         int rows = 0;
         try {
+            System.out.println(sql);
             Connection conn = getConnection();
             rows = QUERY_RUNNER.update(conn, sql, params);
         } catch (SQLException e) {
             throw new RuntimeException("execute update failure", e);
-        } finally {
-            closeConnection();
         }
 
         return rows;
     }
 
+    /**
+     * 插入实体
+     *
+     * @param entityClass
+     * @param fieldMap
+     * @param <T>
+     * @return
+     */
+    public static <T> boolean insertEntity(Class<T> entityClass, Map<String, Object> fieldMap) {
+        if (CollectionUtil.isEmpty(fieldMap)) {
+            LOGGER.error("can not insert entity: fieldMap is empty");
+            return false;
+        }
 
+        String sql = "insert into " + getTableName(entityClass);
+        StringBuilder columns = new StringBuilder("(");
+        StringBuilder values = new StringBuilder("(");
+        for (String field : fieldMap.keySet()) {
+            columns.append(field).append(", ");
+            values.append("?, ");
+        }
+        columns.replace(columns.lastIndexOf(", "), columns.length(), ")");
+        values.replace(columns.lastIndexOf(", "), values.length(), ")");
+
+        Object[] params = fieldMap.values().toArray();
+
+        return executeUpdate(sql, params) == 1;
+    }
+
+    /**
+     * 更新实体
+     *
+     * @param entityClass
+     * @param id
+     * @param fieldMap
+     * @param <T>
+     * @return
+     */
+    public static <T> boolean updateEntity(Class<T> entityClass, int id, Map<String, Object> fieldMap) {
+        if (CollectionUtil.isEmpty(fieldMap)) {
+            LOGGER.error("can not update entity: fieldMap is empty");
+            return false;
+        }
+
+        String sql = "update " + getTableName(entityClass) + " set ";
+        StringBuilder columns = new StringBuilder();
+        for (String field : fieldMap.keySet()) {
+            columns.append(field).append("=?, ");
+        }
+        sql += columns.substring(0, columns.lastIndexOf(", ")) + " where id=?";
+
+        List<Object> paramsList = new ArrayList<Object>();
+        paramsList.addAll(fieldMap.values());
+        paramsList.add(id);
+        Object[] params = paramsList.toArray();
+
+        return executeUpdate(sql, params) == 1;
+    }
+
+    /**
+     * 删除实体
+     *
+     * @param entityClass
+     * @param id
+     * @param <T>
+     * @return
+     */
+    public static <T> boolean deleteEntity(Class<T> entityClass, int id) {
+        String sql = "delete from " + getTableName(entityClass) + " where id=?";
+
+        return executeUpdate(sql, id) == 1;
+    }
+
+    public static void executeSqlFile(String filepath) {
+        InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(filepath);
+        BufferedReader reader = new BufferedReader(new InputStreamReader(is));
+        try {
+            String sql;
+            while ((sql = reader.readLine()) != null) {
+                if (!sql.trim().isEmpty()) {
+                    executeUpdate(sql);
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("execute sql file failure", e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * 获取表名
+     *
+     * @param entityClass
+     * @return
+     */
+    private static String getTableName(Class<?> entityClass) {
+        return entityClass.getSimpleName();
+    }
 }
