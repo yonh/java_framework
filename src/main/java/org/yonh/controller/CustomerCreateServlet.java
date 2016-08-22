@@ -26,9 +26,6 @@ public class CustomerCreateServlet extends HttpServlet {
 
     @Override
     protected void doPost(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
-        req.getParameter("name");
-
-
         Map<String, Object> map = new HashMap<String, Object>();
         map.put("name", req.getParameter("name"));
         map.put("contact", req.getParameter("contact"));
